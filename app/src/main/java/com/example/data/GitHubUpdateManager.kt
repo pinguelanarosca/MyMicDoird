@@ -55,57 +55,58 @@ class GitHubUpdateManager(private val context: Context) {
             .build()
 
         try {
-            val response = client.newCall(request).execute()
-            if (!response.isSuccessful) {
-                when (response.code) {
-                    404 -> _updateState.value = UpdateState.Error("Repositório '$cleanRepo' não foi encontrado ou não possui releases publicados.")
-                    403 -> _updateState.value = UpdateState.Error("Limite temporário de requisições da API do GitHub atingido. Tente novamente mais tarde.")
-                    else -> _updateState.value = UpdateState.Error("Erro do GitHub (HTTP ${response.code}): ${response.message}")
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    when (response.code) {
+                        404 -> _updateState.value = UpdateState.Error("Repositório '$cleanRepo' não foi encontrado ou não possui releases publicados.")
+                        403 -> _updateState.value = UpdateState.Error("Limite temporário de requisições da API do GitHub atingido. Tente novamente mais tarde.")
+                        else -> _updateState.value = UpdateState.Error("Erro do GitHub (HTTP ${response.code}): ${response.message}")
+                    }
+                    return@withContext
                 }
-                return@withContext
-            }
 
-            val jsonString = response.body?.string() ?: ""
-            val json = JSONObject(jsonString)
+                val jsonString = response.body?.string() ?: ""
+                val json = JSONObject(jsonString)
 
-            val tagName = json.optString("tag_name", "").trim()
-            val releaseName = json.optString("name", tagName)
-            val body = json.optString("body", "Sem notas de versão.")
-            val publishedAt = json.optString("published_at", "")
+                val tagName = json.optString("tag_name", "").trim()
+                val releaseName = json.optString("name", tagName)
+                val body = json.optString("body", "Sem notas de versão.")
+                val publishedAt = json.optString("published_at", "")
 
-            var apkUrl: String? = null
-            var apkName: String? = null
-            var apkSize: Long = 0L
+                var apkUrl: String? = null
+                var apkName: String? = null
+                var apkSize: Long = 0L
 
-            val assets = json.optJSONArray("assets")
-            if (assets != null) {
-                for (i in 0 until assets.length()) {
-                    val asset = assets.getJSONObject(i)
-                    val name = asset.optString("name", "")
-                    if (name.endsWith(".apk", ignoreCase = true)) {
-                        apkUrl = asset.optString("browser_download_url")
-                        apkName = name
-                        apkSize = asset.optLong("size", 0L)
-                        break
+                val assets = json.optJSONArray("assets")
+                if (assets != null) {
+                    for (i in 0 until assets.length()) {
+                        val asset = assets.getJSONObject(i)
+                        val name = asset.optString("name", "")
+                        if (name.endsWith(".apk", ignoreCase = true)) {
+                            apkUrl = asset.optString("browser_download_url")
+                            apkName = name
+                            apkSize = asset.optLong("size", 0L)
+                            break
+                        }
                     }
                 }
-            }
 
-            val release = GitHubRelease(
-                tagName = tagName,
-                name = releaseName,
-                body = body,
-                publishedAt = publishedAt,
-                apkDownloadUrl = apkUrl,
-                apkFileName = apkName,
-                apkSizeBytes = apkSize
-            )
+                val release = GitHubRelease(
+                    tagName = tagName,
+                    name = releaseName,
+                    body = body,
+                    publishedAt = publishedAt,
+                    apkDownloadUrl = apkUrl,
+                    apkFileName = apkName,
+                    apkSizeBytes = apkSize
+                )
 
-            val currentVersion = BuildConfig.VERSION_NAME
-            if (isNewerVersion(tagName, currentVersion)) {
-                _updateState.value = UpdateState.Available(release)
-            } else {
-                _updateState.value = UpdateState.UpToDate(currentVersion)
+                val currentVersion = BuildConfig.VERSION_NAME
+                if (isNewerVersion(tagName, currentVersion)) {
+                    _updateState.value = UpdateState.Available(release)
+                } else {
+                    _updateState.value = UpdateState.UpToDate(currentVersion)
+                }
             }
         } catch (e: Exception) {
             _updateState.value = UpdateState.Error("Falha na conexão: ${e.localizedMessage ?: "Erro de rede"}")
@@ -127,84 +128,85 @@ class GitHubUpdateManager(private val context: Context) {
             .build()
 
         try {
-            val response = client.newCall(request).execute()
-            if (!response.isSuccessful) {
-                _updateState.value = UpdateState.Error("Falha ao baixar APK: HTTP ${response.code}")
-                return@withContext
-            }
-
-            val body = response.body
-            if (body == null) {
-                _updateState.value = UpdateState.Error("Resposta vazia recebida do servidor do GitHub.")
-                return@withContext
-            }
-
-            val totalBytes = if (release.apkSizeBytes > 0) release.apkSizeBytes else body.contentLength()
-            val destDir = File(context.cacheDir, "updates").apply { mkdirs() }
-            val outputFile = File(destDir, release.apkFileName ?: "mymicdoird_update.apk")
-
-            var inputStream: InputStream? = null
-            var outputStream: FileOutputStream? = null
-
-            try {
-                inputStream = body.byteStream()
-                outputStream = FileOutputStream(outputFile)
-                val buffer = ByteArray(8192)
-                var downloadedBytes = 0L
-                var read: Int
-                var lastProgress = 0
-
-                while (inputStream.read(buffer).also { read = it } != -1) {
-                    outputStream.write(buffer, 0, read)
-                    downloadedBytes += read
-
-                    val progress = if (totalBytes > 0) {
-                        ((downloadedBytes * 100) / totalBytes).toInt().coerceIn(0, 100)
-                    } else {
-                        50
-                    }
-
-                    if (progress != lastProgress) {
-                        lastProgress = progress
-                        _updateState.value = UpdateState.Downloading(
-                            progressPercentage = progress,
-                            downloadedBytes = downloadedBytes,
-                            totalBytes = totalBytes
-                        )
-                    }
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    _updateState.value = UpdateState.Error("Falha ao baixar APK: HTTP ${response.code}")
+                    return@withContext
                 }
-                outputStream.flush()
-            } finally {
-                inputStream?.close()
-                outputStream?.close()
-            }
 
-            // Verify integrity of the downloaded APK archive
-            val archiveInfo = context.packageManager.getPackageArchiveInfo(outputFile.absolutePath, 0)
-            if (archiveInfo == null) {
-                outputFile.delete()
-                _updateState.value = UpdateState.Error("Arquivo APK corrompido ou incompleto. Download descartado.")
-                return@withContext
-            }
+                val body = response.body
+                if (body == null) {
+                    _updateState.value = UpdateState.Error("Resposta vazia recebida do servidor do GitHub.")
+                    return@withContext
+                }
 
-            // Verify packageName matches
-            val expectedPackage = context.packageName
-            if (archiveInfo.packageName != expectedPackage) {
-                outputFile.delete()
-                _updateState.value = UpdateState.Error(
-                    "Incompatibilidade de aplicativo: o pacote '${archiveInfo.packageName}' não corresponde a '$expectedPackage'."
+                val totalBytes = if (release.apkSizeBytes > 0) release.apkSizeBytes else body.contentLength()
+                val destDir = File(context.cacheDir, "updates").apply { mkdirs() }
+                val outputFile = File(destDir, release.apkFileName ?: "mymicdoird_update.apk")
+
+                var inputStream: InputStream? = null
+                var outputStream: FileOutputStream? = null
+
+                try {
+                    inputStream = body.byteStream()
+                    outputStream = FileOutputStream(outputFile)
+                    val buffer = ByteArray(8192)
+                    var downloadedBytes = 0L
+                    var read: Int
+                    var lastProgress = 0
+
+                    while (inputStream.read(buffer).also { read = it } != -1) {
+                        outputStream.write(buffer, 0, read)
+                        downloadedBytes += read
+
+                        val progress = if (totalBytes > 0) {
+                            ((downloadedBytes * 100) / totalBytes).toInt().coerceIn(0, 100)
+                        } else {
+                            50
+                        }
+
+                        if (progress != lastProgress) {
+                            lastProgress = progress
+                            _updateState.value = UpdateState.Downloading(
+                                progressPercentage = progress,
+                                downloadedBytes = downloadedBytes,
+                                totalBytes = totalBytes
+                            )
+                        }
+                    }
+                    outputStream.flush()
+                } finally {
+                    inputStream?.close()
+                    outputStream?.close()
+                }
+
+                // Verify integrity of the downloaded APK archive
+                val archiveInfo = context.packageManager.getPackageArchiveInfo(outputFile.absolutePath, 0)
+                if (archiveInfo == null) {
+                    outputFile.delete()
+                    _updateState.value = UpdateState.Error("Arquivo APK corrompido ou incompleto. Download descartado.")
+                    return@withContext
+                }
+
+                // Verify packageName matches
+                val expectedPackage = context.packageName
+                if (archiveInfo.packageName != expectedPackage) {
+                    outputFile.delete()
+                    _updateState.value = UpdateState.Error(
+                        "Incompatibilidade de aplicativo: o pacote '${archiveInfo.packageName}' não corresponde a '$expectedPackage'."
+                    )
+                    return@withContext
+                }
+
+                // Calculate SHA-256 for integrity verification
+                val sha256 = calculateFileSha256(outputFile)
+
+                _updateState.value = UpdateState.ReadyToInstall(
+                    apkFile = outputFile,
+                    release = release,
+                    sha256 = sha256
                 )
-                return@withContext
             }
-
-            // Calculate SHA-256 for integrity record
-            val sha256 = calculateFileSha256(outputFile)
-
-            _updateState.value = UpdateState.ReadyToInstall(
-                apkFile = outputFile,
-                release = release,
-                sha256 = sha256
-            )
         } catch (e: Exception) {
             _updateState.value = UpdateState.Error("Erro ao baixar atualização: ${e.localizedMessage}")
         }
@@ -313,8 +315,14 @@ class GitHubUpdateManager(private val context: Context) {
 
             companion object {
                 fun parse(raw: String): SemVer? {
-                    val clean = raw.trim().removePrefix("v").removePrefix("V")
+                    var clean = raw.trim().removePrefix("v").removePrefix("V")
                     if (clean.isBlank()) return null
+
+                    // SemVer 2.0.0 Rule 10: Build metadata MUST be ignored when determining version precedence
+                    val plusIdx = clean.indexOf('+')
+                    if (plusIdx >= 0) {
+                        clean = clean.substring(0, plusIdx)
+                    }
 
                     val dashIdx = clean.indexOf('-')
                     val mainPart = if (dashIdx >= 0) clean.substring(0, dashIdx) else clean

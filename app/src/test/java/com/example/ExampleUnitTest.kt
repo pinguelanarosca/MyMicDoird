@@ -7,6 +7,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 class ExampleUnitTest {
 
@@ -30,6 +31,11 @@ class ExampleUnitTest {
     // Comparing pre-releases between each other
     assertTrue(GitHubUpdateManager.isNewerVersion("1.0.0-rc.2", "1.0.0-rc.1"))
     assertFalse(GitHubUpdateManager.isNewerVersion("1.0.0-rc.1", "1.0.0-rc.2"))
+
+    // SemVer 2.0.0 Rule 10: Build metadata MUST be ignored in version precedence
+    assertFalse(GitHubUpdateManager.isNewerVersion("1.0.0+20130313144700", "1.0.0"))
+    assertFalse(GitHubUpdateManager.isNewerVersion("1.0.0", "1.0.0+exp.sha.5114f85"))
+    assertTrue(GitHubUpdateManager.isNewerVersion("1.0.1+build.1", "1.0.0+build.999"))
   }
 
   @Test
@@ -60,5 +66,26 @@ class ExampleUnitTest {
     assertEquals("pinguelanarosca/MyMicDoird", PreferencesManager.sanitizeRepoName("pinguelanarosca/MyMicDoird"))
     assertEquals("pinguelanarosca/MyMicDoird", PreferencesManager.sanitizeRepoName("  https://github.com/pinguelanarosca/MyMicDoird/  "))
     assertEquals("pinguelanarosca/MyMicDoird", PreferencesManager.sanitizeRepoName("http://github.com/pinguelanarosca/MyMicDoird.git"))
+  }
+
+  @Test
+  fun testLinuxScriptFileExistsAndHasAdbSerialHandling() {
+    val scriptFile = listOf(
+      File("linux/mymicdoird.sh"),
+      File("../linux/mymicdoird.sh")
+    ).firstOrNull { it.exists() } ?: File("linux/mymicdoird.sh")
+    assertTrue("O arquivo linux/mymicdoird.sh deve existir no repositório", scriptFile.exists())
+    val content = scriptFile.readText()
+
+    // Must handle serial explicitly for multi-device environments
+    assertTrue("Script deve usar adb -s com serial", content.contains("adb -s \"\$SERIAL\" forward"))
+    assertTrue("Script deve verificar ANDROID_SERIAL", content.contains("ANDROID_SERIAL"))
+
+    // Must NOT contain indiscriminate unloads of third-party sinks
+    assertFalse("Script não deve descarregar todos os null-sinks do sistema", content.contains("pactl unload-module module-null-sink 2>/dev/null"))
+    assertFalse("Script não deve descarregar todos os pipe-sources do sistema", content.contains("pactl unload-module module-pipe-source 2>/dev/null"))
+
+    // Must use specific module ID cleanup
+    assertTrue("Script deve descarregar MODULE_ID específico", content.contains("pactl unload-module \"\$MODULE_ID\""))
   }
 }

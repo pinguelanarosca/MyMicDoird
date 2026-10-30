@@ -319,9 +319,12 @@ fun MainScreen(
                         .pointerInput(Unit) {
                             detectTapGestures(
                                 onPress = {
-                                    viewModel.setPushToTalk(true)
-                                    tryAwaitRelease()
-                                    viewModel.setPushToTalk(false)
+                                    try {
+                                        viewModel.setPushToTalk(true)
+                                        tryAwaitRelease()
+                                    } finally {
+                                        viewModel.setPushToTalk(false)
+                                    }
                                 }
                             )
                         }

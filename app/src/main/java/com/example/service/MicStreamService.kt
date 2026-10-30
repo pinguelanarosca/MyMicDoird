@@ -32,26 +32,63 @@ class MicStreamService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var wakeLock: PowerManager.WakeLock? = null
+    private var lastNotificationUpdateTime = 0L
+    private var lastNotificationText = ""
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         instance = this
-        audioStreamManager = AudioStreamManager(applicationContext)
+
+        val manager = AudioStreamManager(applicationContext)
+        audioStreamManager = manager
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MyMicDoird::StreamingWakeLock").apply {
             setReferenceCounted(false)
         }
 
+        manager.onCaptureStateChanged = { isCapturing ->
+            if (isCapturing) {
+                acquireWakeLock()
+            } else {
+                releaseWakeLock()
+            }
+        }
+
+        manager.onCaptureFatalError = { errorMessage ->
+            releaseWakeLock()
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val errorNotification = buildNotification("Erro: $errorMessage")
+            nm.notify(NOTIFICATION_ID, errorNotification)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+
         createNotificationChannel()
 
         serviceScope.launch {
-            audioStreamManager?.metrics?.collect { metrics ->
-                updateNotification(metrics)
+            manager.metrics.collect { metrics ->
+                updateNotificationThrottled(metrics)
             }
         }
+    }
+
+    private fun acquireWakeLock() {
+        try {
+            if (wakeLock?.isHeld != true) {
+                wakeLock?.acquire(4 * 60 * 60 * 1000L) // 4 hours safety window while recording
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+        } catch (_: Exception) {}
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -70,16 +107,14 @@ class MicStreamService : Service() {
                     return START_NOT_STICKY
                 }
 
-                val prefs = PreferencesManager(applicationContext)
-                val config = prefs.loadConfig()
-
-                // Acquire WakeLock safely while active
-                try {
-                    wakeLock?.acquire(4 * 60 * 60 * 1000L) // 4 hours safety max
-                } catch (_: Exception) {}
-
-                startForegroundWithNotification()
-                audioStreamManager?.start(config, serviceScope)
+                val started = startForegroundWithNotification()
+                if (started) {
+                    val prefs = PreferencesManager(applicationContext)
+                    val config = prefs.loadConfig()
+                    audioStreamManager?.start(config, serviceScope)
+                } else {
+                    stopSelf()
+                }
             }
             ACTION_STOP -> {
                 stopStreamingAndService()
@@ -93,31 +128,49 @@ class MicStreamService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun startForegroundWithNotification() {
-        val notification = buildNotification("Iniciando captura de áudio...")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+    private fun startForegroundWithNotification(): Boolean {
+        return try {
+            val notification = buildNotification("Iniciando captura de áudio...")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            true
+        } catch (e: SecurityException) {
+            false
         }
     }
 
-    private fun updateNotification(metrics: StreamMetrics) {
+    /**
+     * Throttles notification updates to at most once per second for byte counters,
+     * while publishing state changes immediately.
+     */
+    private fun updateNotificationThrottled(metrics: StreamMetrics) {
         val text = when {
+            metrics.errorMessage != null -> "Erro: ${metrics.errorMessage}"
+            !metrics.isRunning -> "Pronto"
             metrics.isMuted -> "Microfone MUTADO"
             metrics.isConnected -> "Transmitindo para Ubuntu (${formatBytes(metrics.bytesSent)})"
             metrics.isListening -> "Aguardando conexão via ADB..."
-            metrics.errorMessage != null -> "Erro: ${metrics.errorMessage}"
             else -> "Pronto"
         }
 
-        val notification = buildNotification(text)
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(NOTIFICATION_ID, notification)
+        val now = System.currentTimeMillis()
+        val textChanged = text != lastNotificationText
+        val timeElapsed = (now - lastNotificationUpdateTime) >= 1000
+
+        if (textChanged || timeElapsed) {
+            lastNotificationText = text
+            lastNotificationUpdateTime = now
+            val notification = buildNotification(text)
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.notify(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun buildNotification(statusText: String): Notification {
@@ -185,11 +238,7 @@ class MicStreamService : Service() {
 
     private fun stopStreamingAndService() {
         audioStreamManager?.stop()
-        try {
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
-            }
-        } catch (_: Exception) {}
+        releaseWakeLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
