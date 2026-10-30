@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">DroidMic</string>
+    <string name="channel_streaming_name">Serviço de Microfone DroidMic</string>
+    <string name="channel_streaming_desc">Notificação contínua enquanto o microfone estiver transmitindo áudio para o PC.</string>
+    <string name="status_ready">Pronto para conectar</string>
+    <string name="status_listening">Aguardando conexão do Ubuntu no porto %1$d…</string>
+    <string name="status_streaming">Transmitindo áudio ao vivo</string>
+    <string name="status_paused">Microfone Mutado</string>
+    <string name="status_error">Erro na conexão</string>
+    <string name="btn_start">Iniciar Microfone</string>
+    <string name="btn_stop">Parar Transmissão</string>
+    <string name="btn_mute">Mutar</string>
+    <string name="btn_unmute">Desmutar</string>
+</resources>
