@@ -144,14 +144,14 @@ fun MainScreen(
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = "DROID",
+                        text = "MYMIC",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Black,
                         color = Color.White,
                         letterSpacing = 1.5.sp
                     )
                     Text(
-                        text = "MIC",
+                        text = "DOIRD",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Black,
                         color = CyanPrimary,

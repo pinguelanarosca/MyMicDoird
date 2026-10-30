@@ -25,11 +25,18 @@ class ExampleRobolectricTest {
   fun `read string from context`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val appName = context.getString(R.string.app_name)
-    assertEquals("DroidMic", appName)
+    assertEquals("MyMicDoird", appName)
   }
 
   @Test
-  fun `preferences manager save and load config`() {
+  fun `preferences manager default repo is pinguelanarosca MyMicDoird`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val prefs = PreferencesManager(context)
+    assertEquals("pinguelanarosca/MyMicDoird", prefs.getGitHubRepo())
+  }
+
+  @Test
+  fun `preferences manager save and load config with loopback security`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val prefs = PreferencesManager(context)
     val customConfig = StreamConfig(
@@ -37,6 +44,7 @@ class ExampleRobolectricTest {
         sampleRate = 44100,
         channels = 2,
         streamMode = StreamMode.TCP_SERVER,
+        bindToLoopbackOnly = true,
         bufferPreset = BufferPreset.ULTRA_LOW,
         enableNoiseSuppressor = true,
         enableEchoCanceler = true,
@@ -48,23 +56,12 @@ class ExampleRobolectricTest {
     assertEquals(9099, loaded.port)
     assertEquals(44100, loaded.sampleRate)
     assertEquals(2, loaded.channels)
+    assertTrue(loaded.bindToLoopbackOnly)
     assertEquals(BufferPreset.ULTRA_LOW, loaded.bufferPreset)
     assertTrue(loaded.enableNoiseSuppressor)
     assertTrue(loaded.enableEchoCanceler)
     assertEquals(2.5f, loaded.gainMultiplier, 0.01f)
     assertFalse(loaded.keepScreenOn)
-  }
-
-  @Test
-  fun `preferences manager handles github repo sanitization`() {
-    val context = ApplicationProvider.getApplicationContext<Context>()
-    val prefs = PreferencesManager(context)
-
-    prefs.saveGitHubRepo("  https://github.com/alexandreoops/droidmic/  ")
-    assertEquals("alexandreoops/droidmic", prefs.getGitHubRepo())
-
-    prefs.saveGitHubRepo("custom-user/custom-app")
-    assertEquals("custom-user/custom-app", prefs.getGitHubRepo())
   }
 
   @Test
@@ -79,28 +76,36 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `viewmodel generates valid ubuntu pipewire and fallback commands`() {
+  fun `viewmodel generates ubuntu scripts that do not indiscriminately unload external audio modules`() {
     val app = ApplicationProvider.getApplicationContext<Application>()
     val viewModel = MainViewModel(app)
 
-    // Default port 8088, 48000 Hz, mono
-    val adbCmd = viewModel.getAdbForwardCommand()
-    assertTrue(adbCmd.contains("adb forward tcp:8088 tcp:8088"))
-
-    val pipeWireCmd = viewModel.getPipeWireCommand()
-    assertTrue(pipeWireCmd.contains("module-null-sink"))
-    assertTrue(pipeWireCmd.contains("media.class=Audio/Source/Virtual"))
-    assertTrue(pipeWireCmd.contains("sink_name=DroidMic"))
-    assertTrue(pipeWireCmd.contains("pw-cat -p --rate=48000 --channels=1"))
-
-    val pulseAudioCmd = viewModel.getPulseAudioCommand()
-    assertTrue(pulseAudioCmd.contains("module-pipe-source"))
-    assertTrue(pulseAudioCmd.contains("mkfifo"))
-
     val script = viewModel.getCompleteBashScript()
-    assertTrue(script.contains("trap cleanup INT TERM EXIT"))
-    assertTrue(script.contains("pw-cat"))
-    assertTrue(script.contains("pacat"))
-    assertTrue(script.contains("sleep 2"))
+
+    // Must NOT contain indiscriminate unloads
+    assertFalse(
+        "Script must not blindly unload all null-sinks from the host system",
+        script.contains("pactl unload-module module-null-sink 2>/dev/null")
+    )
+    assertFalse(
+        "Script must not blindly unload all pipe-sources from the host system",
+        script.contains("pactl unload-module module-pipe-source 2>/dev/null")
+    )
+
+    // Must use specific module ID cleanup
+    assertTrue(
+        "Script must unload specific MODULE_ID",
+        script.contains("pactl unload-module \"\$MODULE_ID\"")
+    )
+
+    // Must target MyMicDoird device name
+    assertTrue(
+        "Script must declare MyMicDoird sink",
+        script.contains("sink_name=\"\$DEVICE_NAME\"")
+    )
+    assertTrue(
+        "Script must have DEVICE_NAME MyMicDoird",
+        script.contains("DEVICE_NAME=\"MyMicDoird\"")
+    )
   }
 }

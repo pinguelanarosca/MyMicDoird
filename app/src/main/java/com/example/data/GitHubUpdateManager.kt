@@ -18,8 +18,10 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 class GitHubUpdateManager(private val context: Context) {
@@ -38,22 +40,27 @@ class GitHubUpdateManager(private val context: Context) {
 
     suspend fun checkForUpdates(repo: String) = withContext(Dispatchers.IO) {
         _updateState.value = UpdateState.Checking
-        val cleanRepo = repo.trim().removePrefix("https://github.com/").removeSuffix("/")
+        val cleanRepo = PreferencesManager.sanitizeRepoName(repo)
+
+        if (cleanRepo.isBlank() || !cleanRepo.contains("/")) {
+            _updateState.value = UpdateState.Error("Nome de repositório inválido. Formato esperado: usuario/repositorio")
+            return@withContext
+        }
 
         val url = "https://api.github.com/repos/$cleanRepo/releases/latest"
         val request = Request.Builder()
             .url(url)
             .header("Accept", "application/vnd.github.v3+json")
-            .header("User-Agent", "DroidMic-Android-App")
+            .header("User-Agent", "MyMicDoird-Android-App")
             .build()
 
         try {
             val response = client.newCall(request).execute()
             if (!response.isSuccessful) {
-                if (response.code == 404) {
-                    _updateState.value = UpdateState.Error("Repositório '$cleanRepo' não encontrado ou não possui releases publicados.")
-                } else {
-                    _updateState.value = UpdateState.Error("Erro do GitHub: código ${response.code} (${response.message})")
+                when (response.code) {
+                    404 -> _updateState.value = UpdateState.Error("Repositório '$cleanRepo' não foi encontrado ou não possui releases publicados.")
+                    403 -> _updateState.value = UpdateState.Error("Limite temporário de requisições da API do GitHub atingido. Tente novamente mais tarde.")
+                    else -> _updateState.value = UpdateState.Error("Erro do GitHub (HTTP ${response.code}): ${response.message}")
                 }
                 return@withContext
             }
@@ -101,38 +108,14 @@ class GitHubUpdateManager(private val context: Context) {
                 _updateState.value = UpdateState.UpToDate(currentVersion)
             }
         } catch (e: Exception) {
-            _updateState.value = UpdateState.Error("Falha na conexão: ${e.localizedMessage ?: "Erro desconhecido"}")
+            _updateState.value = UpdateState.Error("Falha na conexão: ${e.localizedMessage ?: "Erro de rede"}")
         }
-    }
-
-    private fun isNewerVersion(remoteTag: String, currentVersion: String): Boolean {
-        // Strip 'v' prefix if present
-        val remoteClean = remoteTag.removePrefix("v").removePrefix("V").trim()
-        val currentClean = currentVersion.removePrefix("v").removePrefix("V").trim()
-
-        if (remoteClean.isEmpty()) return false
-        if (remoteClean == currentClean) return false
-
-        // Parse semver parts: 1.2.0 vs 1.1.0
-        val remoteParts = remoteClean.split(".", "-", "_").mapNotNull { it.toIntOrNull() }
-        val currentParts = currentClean.split(".", "-", "_").mapNotNull { it.toIntOrNull() }
-
-        val maxLen = maxOf(remoteParts.size, currentParts.size)
-        for (i in 0 until maxLen) {
-            val r = remoteParts.getOrElse(i) { 0 }
-            val c = currentParts.getOrElse(i) { 0 }
-            if (r > c) return true
-            if (r < c) return false
-        }
-
-        // If numeric parts identical, check string inequality
-        return remoteClean != currentClean
     }
 
     suspend fun downloadAndPrepareInstall(release: GitHubRelease) = withContext(Dispatchers.IO) {
         val downloadUrl = release.apkDownloadUrl
         if (downloadUrl.isNullOrEmpty()) {
-            _updateState.value = UpdateState.Error("A release '${release.tagName}' não contém um arquivo .apk nos assets.")
+            _updateState.value = UpdateState.Error("A release '${release.tagName}' não contém um arquivo .apk nos assets para download.")
             return@withContext
         }
 
@@ -140,7 +123,7 @@ class GitHubUpdateManager(private val context: Context) {
 
         val request = Request.Builder()
             .url(downloadUrl)
-            .header("User-Agent", "DroidMic-Android-App")
+            .header("User-Agent", "MyMicDoird-Android-App")
             .build()
 
         try {
@@ -152,13 +135,13 @@ class GitHubUpdateManager(private val context: Context) {
 
             val body = response.body
             if (body == null) {
-                _updateState.value = UpdateState.Error("Resposta vazia do servidor.")
+                _updateState.value = UpdateState.Error("Resposta vazia recebida do servidor do GitHub.")
                 return@withContext
             }
 
             val totalBytes = if (release.apkSizeBytes > 0) release.apkSizeBytes else body.contentLength()
             val destDir = File(context.cacheDir, "updates").apply { mkdirs() }
-            val outputFile = File(destDir, release.apkFileName ?: "droidmic_update.apk")
+            val outputFile = File(destDir, release.apkFileName ?: "mymicdoird_update.apk")
 
             var inputStream: InputStream? = null
             var outputStream: FileOutputStream? = null
@@ -191,11 +174,37 @@ class GitHubUpdateManager(private val context: Context) {
                     }
                 }
                 outputStream.flush()
-                _updateState.value = UpdateState.ReadyToInstall(outputFile, release)
             } finally {
                 inputStream?.close()
                 outputStream?.close()
             }
+
+            // Verify integrity of the downloaded APK archive
+            val archiveInfo = context.packageManager.getPackageArchiveInfo(outputFile.absolutePath, 0)
+            if (archiveInfo == null) {
+                outputFile.delete()
+                _updateState.value = UpdateState.Error("Arquivo APK corrompido ou incompleto. Download descartado.")
+                return@withContext
+            }
+
+            // Verify packageName matches
+            val expectedPackage = context.packageName
+            if (archiveInfo.packageName != expectedPackage) {
+                outputFile.delete()
+                _updateState.value = UpdateState.Error(
+                    "Incompatibilidade de aplicativo: o pacote '${archiveInfo.packageName}' não corresponde a '$expectedPackage'."
+                )
+                return@withContext
+            }
+
+            // Calculate SHA-256 for integrity record
+            val sha256 = calculateFileSha256(outputFile)
+
+            _updateState.value = UpdateState.ReadyToInstall(
+                apkFile = outputFile,
+                release = release,
+                sha256 = sha256
+            )
         } catch (e: Exception) {
             _updateState.value = UpdateState.Error("Erro ao baixar atualização: ${e.localizedMessage}")
         }
@@ -232,6 +241,100 @@ class GitHubUpdateManager(private val context: Context) {
         } catch (e: Exception) {
             e.printStackTrace()
             return false
+        }
+    }
+
+    companion object {
+        fun calculateFileSha256(file: File): String {
+            return try {
+                val digest = MessageDigest.getInstance("SHA-256")
+                FileInputStream(file).use { fis ->
+                    val buffer = ByteArray(8192)
+                    var read: Int
+                    while (fis.read(buffer).also { read = it } != -1) {
+                        digest.update(buffer, 0, read)
+                    }
+                }
+                digest.digest().joinToString("") { "%02x".format(it) }
+            } catch (_: Exception) {
+                ""
+            }
+        }
+
+        data class SemVer(
+            val major: Int,
+            val minor: Int,
+            val patch: Int,
+            val preRelease: String?
+        ) : Comparable<SemVer> {
+            override fun compareTo(other: SemVer): Int {
+                if (major != other.major) return major.compareTo(other.major)
+                if (minor != other.minor) return minor.compareTo(other.minor)
+                if (patch != other.patch) return patch.compareTo(other.patch)
+
+                // SemVer 2.0.0 Rule 11: Normal version has higher precedence than pre-release
+                // e.g. 1.0.0 > 1.0.0-rc1
+                if (preRelease == null && other.preRelease != null) return 1
+                if (preRelease != null && other.preRelease == null) return -1
+                if (preRelease == null && other.preRelease == null) return 0
+
+                // Both have pre-release strings
+                return comparePreReleaseIdentifiers(preRelease!!, other.preRelease!!)
+            }
+
+            private fun comparePreReleaseIdentifiers(p1: String, p2: String): Int {
+                val parts1 = p1.split(".")
+                val parts2 = p2.split(".")
+                val max = maxOf(parts1.size, parts2.size)
+
+                for (i in 0 until max) {
+                    if (i >= parts1.size) return -1
+                    if (i >= parts2.size) return 1
+
+                    val id1 = parts1[i]
+                    val id2 = parts2[i]
+
+                    val num1 = id1.toIntOrNull()
+                    val num2 = id2.toIntOrNull()
+
+                    if (num1 != null && num2 != null) {
+                        if (num1 != num2) return num1.compareTo(num2)
+                    } else if (num1 != null) {
+                        return -1 // numeric identifiers have lower precedence than alphanumeric
+                    } else if (num2 != null) {
+                        return 1
+                    } else {
+                        val cmp = id1.compareTo(id2)
+                        if (cmp != 0) return cmp
+                    }
+                }
+                return 0
+            }
+
+            companion object {
+                fun parse(raw: String): SemVer? {
+                    val clean = raw.trim().removePrefix("v").removePrefix("V")
+                    if (clean.isBlank()) return null
+
+                    val dashIdx = clean.indexOf('-')
+                    val mainPart = if (dashIdx >= 0) clean.substring(0, dashIdx) else clean
+                    val prePart = if (dashIdx >= 0) clean.substring(dashIdx + 1) else null
+
+                    val numbers = mainPart.split(".").mapNotNull { it.toIntOrNull() }
+                    val major = numbers.getOrNull(0) ?: 0
+                    val minor = numbers.getOrNull(1) ?: 0
+                    val patch = numbers.getOrNull(2) ?: 0
+
+                    return SemVer(major, minor, patch, prePart)
+                }
+            }
+        }
+
+        fun isNewerVersion(remoteTag: String, currentVersion: String): Boolean {
+            val remoteSemVer = SemVer.parse(remoteTag) ?: return false
+            val currentSemVer = SemVer.parse(currentVersion) ?: return false
+
+            return remoteSemVer > currentSemVer
         }
     }
 }

@@ -22,6 +22,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Router
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
@@ -60,6 +61,7 @@ import com.example.model.StreamConfig
 import com.example.model.StreamMode
 import com.example.ui.MainViewModel
 import com.example.ui.theme.CyanPrimary
+import com.example.ui.theme.VuRed
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -75,6 +77,7 @@ fun ConfigScreen(
     var portText by remember(currentConfig) { mutableStateOf(currentConfig.port.toString()) }
     var selectedMode by remember(currentConfig) { mutableStateOf(currentConfig.streamMode) }
     var targetHostText by remember(currentConfig) { mutableStateOf(currentConfig.targetHost) }
+    var bindToLoopbackOnly by remember(currentConfig) { mutableStateOf(currentConfig.bindToLoopbackOnly) }
     var selectedSampleRate by remember(currentConfig) { mutableIntStateOf(currentConfig.sampleRate) }
     var selectedChannels by remember(currentConfig) { mutableIntStateOf(currentConfig.channels) }
     var selectedBufferPreset by remember(currentConfig) { mutableStateOf(currentConfig.bufferPreset) }
@@ -83,6 +86,9 @@ fun ConfigScreen(
     var enableEchoCanceler by remember(currentConfig) { mutableStateOf(currentConfig.enableEchoCanceler) }
     var enableAutoGainControl by remember(currentConfig) { mutableStateOf(currentConfig.enableAutoGainControl) }
     var keepScreenOn by remember(currentConfig) { mutableStateOf(currentConfig.keepScreenOn) }
+
+    val parsedPort = portText.toIntOrNull()
+    val isPortValid = parsedPort != null && StreamConfig.isValidPort(parsedPort)
 
     Column(
         modifier = modifier
@@ -115,7 +121,7 @@ fun ConfigScreen(
                     color = Color.White
                 )
                 Text(
-                    text = "Parâmetros de latência, áudio e rede",
+                    text = "Parâmetros de latência, áudio e segurança",
                     style = MaterialTheme.typography.bodySmall,
                     color = Color(0xFF64748B)
                 )
@@ -130,7 +136,14 @@ fun ConfigScreen(
                 value = portText,
                 onValueChange = { portText = it.filter { ch -> ch.isDigit() }.take(5) },
                 label = { Text("Porto TCP / UDP") },
-                supportingText = { Text("Padrão: 8088. Deve coincidir com o comando adb forward tcp:PORT tcp:PORT") },
+                isError = !isPortValid && portText.isNotBlank(),
+                supportingText = {
+                    if (!isPortValid && portText.isNotBlank()) {
+                        Text("Porto inválido! Deve ser entre 1024 e 65535.", color = VuRed)
+                    } else {
+                        Text("Padrão: 8088. Portas permitidas: 1024 a 65535.")
+                    }
+                },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth().testTag("input_port"),
@@ -163,12 +176,24 @@ fun ConfigScreen(
                     value = targetHostText,
                     onValueChange = { targetHostText = it },
                     label = { Text("IP / Host Alvo do Ubuntu") },
-                    supportingText = { Text("127.0.0.1 via adb reverse, ou IP da máquina na rede local") },
+                    supportingText = { Text("127.0.0.1 via adb reverse, ou IP da máquina na rede") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("input_target_host"),
                     colors = textFieldColors()
                 )
             }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Segurança de Rede Card
+        SectionCard(title = "Segurança de Conexão", icon = Icons.Default.Security) {
+            SwitchRow(
+                title = "Restringir a Loopback (ADB Seguro)",
+                subtitle = "Faz bind exclusivo em 127.0.0.1 impedindo acesso não autorizado pela rede Wi-Fi",
+                checked = bindToLoopbackOnly,
+                onCheckedChange = { bindToLoopbackOnly = it }
+            )
         }
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -283,11 +308,12 @@ fun ConfigScreen(
         // Save & Reset Buttons
         Button(
             onClick = {
-                val parsedPort = portText.toIntOrNull() ?: 8088
+                val safePort = StreamConfig.sanitizePort(portText.toIntOrNull() ?: 8088)
                 val newConfig = currentConfig.copy(
-                    port = parsedPort,
+                    port = safePort,
                     streamMode = selectedMode,
                     targetHost = targetHostText.trim(),
+                    bindToLoopbackOnly = bindToLoopbackOnly,
                     sampleRate = selectedSampleRate,
                     channels = selectedChannels,
                     bufferPreset = selectedBufferPreset,

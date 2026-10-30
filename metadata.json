@@ -1,5 +1,5 @@
 {
-  "name": "DroidMic",
+  "name": "MyMicDoird",
   "description": "Transforme seu smartphone Android em um microfone de alta qualidade para Ubuntu/Linux via ADB com latência ultra-baixa, controle de ganho e atualizações automáticas via GitHub.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

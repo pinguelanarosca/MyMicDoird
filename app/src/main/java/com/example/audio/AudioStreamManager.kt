@@ -29,6 +29,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.log10
@@ -63,6 +64,9 @@ class AudioStreamManager(private val context: Context) {
     @Volatile
     private var streamingStartTime = 0L
 
+    @Volatile
+    private var isStopping = false
+
     fun setMuted(muted: Boolean) {
         isMuted = muted
         _metrics.value = _metrics.value.copy(isMuted = muted)
@@ -87,9 +91,11 @@ class AudioStreamManager(private val context: Context) {
             return
         }
 
-        activeConfig = config
+        val sanitizedPort = StreamConfig.sanitizePort(config.port)
+        activeConfig = config.copy(port = sanitizedPort)
         totalBytesTransmitted = 0L
         streamingStartTime = System.currentTimeMillis()
+        isStopping = false
 
         _metrics.value = StreamMetrics(
             isRunning = true,
@@ -99,11 +105,11 @@ class AudioStreamManager(private val context: Context) {
         )
 
         streamJob = scope.launch(Dispatchers.IO) {
-            runStreamingPipeline(config)
+            runStreamingPipeline(activeConfig)
         }
 
         statsJob = scope.launch(Dispatchers.Default) {
-            while (isActive) {
+            while (isActive && !isStopping) {
                 if (_metrics.value.isRunning && streamingStartTime > 0L) {
                     val duration = (System.currentTimeMillis() - streamingStartTime) / 1000
                     _metrics.value = _metrics.value.copy(
@@ -118,6 +124,7 @@ class AudioStreamManager(private val context: Context) {
 
     @Synchronized
     fun stop() {
+        isStopping = true
         streamJob?.cancel()
         statsJob?.cancel()
         streamJob = null
@@ -145,7 +152,7 @@ class AudioStreamManager(private val context: Context) {
         if (minBufferSize <= 0) {
             _metrics.value = _metrics.value.copy(
                 isRunning = false,
-                errorMessage = "Configuração de áudio não suportada pelo hardware do aparelho."
+                errorMessage = "Taxa de amostragem (${config.sampleRate}Hz) ou formato de canais não suportado pelo aparelho."
             )
             return
         }
@@ -167,7 +174,7 @@ class AudioStreamManager(private val context: Context) {
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
                 _metrics.value = _metrics.value.copy(
                     isRunning = false,
-                    errorMessage = "Falha ao inicializar AudioRecord. Verifique se outro app está usando o microfone."
+                    errorMessage = "Falha ao inicializar AudioRecord. O microfone pode estar ocupado por outro app."
                 )
                 cleanupHardware()
                 return
@@ -198,7 +205,7 @@ class AudioStreamManager(private val context: Context) {
         } catch (e: Exception) {
             _metrics.value = _metrics.value.copy(
                 isRunning = false,
-                errorMessage = "Erro no stream: ${e.localizedMessage ?: e.message}"
+                errorMessage = "Erro no fluxo de áudio: ${e.localizedMessage ?: e.message}"
             )
         } finally {
             cleanupHardware()
@@ -206,10 +213,17 @@ class AudioStreamManager(private val context: Context) {
     }
 
     private suspend fun streamTcpServer(config: StreamConfig, bufferSize: Int) {
+        val bindAddress = if (config.bindToLoopbackOnly) {
+            InetAddress.getByName("127.0.0.1")
+        } else {
+            InetAddress.getByName("0.0.0.0")
+        }
+
         try {
             serverSocket = ServerSocket().apply {
                 reuseAddress = true
-                bind(InetSocketAddress(config.port))
+                soTimeout = 2000 // 2 second timeout to allow periodic cancellation checks
+                bind(InetSocketAddress(bindAddress, config.port))
             }
         } catch (e: IOException) {
             _metrics.value = _metrics.value.copy(
@@ -228,7 +242,7 @@ class AudioStreamManager(private val context: Context) {
         val byteBuffer = ByteArray(bufferSize)
         val shortBuffer = ShortArray(bufferSize / 2)
 
-        while (serverSocket?.isClosed == false) {
+        while (!isStopping && serverSocket?.isClosed == false) {
             var client: Socket? = null
             try {
                 _metrics.value = _metrics.value.copy(
@@ -237,9 +251,16 @@ class AudioStreamManager(private val context: Context) {
                     clientAddress = null
                 )
 
-                client = serverSocket?.accept() ?: break
+                try {
+                    client = serverSocket?.accept() ?: break
+                } catch (e: SocketTimeoutException) {
+                    // Timeout hit: loop back and recheck isStopping / cancellation
+                    continue
+                }
+
                 client.tcpNoDelay = true
                 client.sendBufferSize = bufferSize * 4
+                client.soTimeout = 5000
 
                 val clientAddr = "${client.inetAddress.hostAddress}:${client.port}"
                 _metrics.value = _metrics.value.copy(
@@ -250,7 +271,7 @@ class AudioStreamManager(private val context: Context) {
 
                 val outStream: OutputStream = client.getOutputStream()
 
-                while (client.isConnected && !client.isClosed) {
+                while (!isStopping && client.isConnected && !client.isClosed) {
                     val readShorts = audioRecord?.read(shortBuffer, 0, shortBuffer.size) ?: -1
                     if (readShorts <= 0) {
                         delay(5)
@@ -259,14 +280,19 @@ class AudioStreamManager(private val context: Context) {
 
                     processAndCalculateLevels(shortBuffer, readShorts, byteBuffer)
 
-                    outStream.write(byteBuffer, 0, readShorts * 2)
-                    outStream.flush()
-                    totalBytesTransmitted += (readShorts * 2)
+                    try {
+                        outStream.write(byteBuffer, 0, readShorts * 2)
+                        outStream.flush()
+                        totalBytesTransmitted += (readShorts * 2)
+                    } catch (e: IOException) {
+                        // Ubuntu side closed pipe or disconnected; break to accept next connection
+                        break
+                    }
                 }
             } catch (e: CancellationException) {
                 break
             } catch (e: IOException) {
-                // Client disconnected from Ubuntu side, wait for next connection
+                // Connection error; continue listening for reconnection
             } finally {
                 try { client?.close() } catch (_: Exception) {}
             }
@@ -277,7 +303,7 @@ class AudioStreamManager(private val context: Context) {
         val shortBuffer = ShortArray(bufferSize / 2)
         val byteBuffer = ByteArray(bufferSize)
 
-        while (true) {
+        while (!isStopping) {
             var socket: Socket? = null
             try {
                 _metrics.value = _metrics.value.copy(
@@ -288,7 +314,8 @@ class AudioStreamManager(private val context: Context) {
 
                 socket = Socket()
                 socket.tcpNoDelay = true
-                socket.connect(InetSocketAddress(config.targetHost, config.port), 4000)
+                socket.soTimeout = 3000
+                socket.connect(InetSocketAddress(config.targetHost, config.port), 3000)
 
                 val outStream = socket.getOutputStream()
                 _metrics.value = _metrics.value.copy(
@@ -297,7 +324,7 @@ class AudioStreamManager(private val context: Context) {
                     clientAddress = "${config.targetHost}:${config.port}"
                 )
 
-                while (socket.isConnected && !socket.isClosed) {
+                while (!isStopping && socket.isConnected && !socket.isClosed) {
                     val readShorts = audioRecord?.read(shortBuffer, 0, shortBuffer.size) ?: -1
                     if (readShorts <= 0) {
                         delay(5)
@@ -313,6 +340,7 @@ class AudioStreamManager(private val context: Context) {
             } catch (e: CancellationException) {
                 break
             } catch (e: IOException) {
+                if (isStopping) break
                 _metrics.value = _metrics.value.copy(
                     isConnected = false,
                     clientAddress = "Tentando reconectar a ${config.targetHost}:${config.port}…"
@@ -337,7 +365,7 @@ class AudioStreamManager(private val context: Context) {
             clientAddress = "UDP -> ${config.targetHost}:${config.port}"
         )
 
-        while (udpSocket?.isClosed == false) {
+        while (!isStopping && udpSocket?.isClosed == false) {
             val readShorts = audioRecord?.read(shortBuffer, 0, shortBuffer.size) ?: -1
             if (readShorts <= 0) {
                 delay(5)
@@ -346,9 +374,13 @@ class AudioStreamManager(private val context: Context) {
 
             processAndCalculateLevels(shortBuffer, readShorts, byteBuffer)
 
-            val packet = DatagramPacket(byteBuffer, readShorts * 2, targetAddr, config.port)
-            udpSocket?.send(packet)
-            totalBytesTransmitted += (readShorts * 2)
+            try {
+                val packet = DatagramPacket(byteBuffer, readShorts * 2, targetAddr, config.port)
+                udpSocket?.send(packet)
+                totalBytesTransmitted += (readShorts * 2)
+            } catch (e: IOException) {
+                if (isStopping) break
+            }
         }
     }
 
@@ -417,6 +449,7 @@ class AudioStreamManager(private val context: Context) {
         )
     }
 
+    @Synchronized
     private fun cleanupHardware() {
         try {
             audioRecord?.stop()

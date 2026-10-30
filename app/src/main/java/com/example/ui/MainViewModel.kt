@@ -127,11 +127,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 # 1. Encaminhar porta ADB do celular para o Ubuntu
 adb forward tcp:$p tcp:$p
 
-# 2. Criar Microfone Virtual nativo no PipeWire (Ubuntu 24.04 LTS)
-pactl load-module module-null-sink media.class=Audio/Source/Virtual sink_name=DroidMic channel_map=$chMap
+# 2. Criar Microfone Virtual nativo no PipeWire (Ubuntu 24.04 LTS / 22.04 LTS)
+pactl load-module module-null-sink media.class=Audio/Source/Virtual sink_name=MyMicDoird channel_map=$chMap
 
 # 3. Transmitir audio direto para o dispositivo virtual
-nc 127.0.0.1 $p | pw-cat -p --rate=$rate --channels=$ch --format=s16le --target=DroidMic
+nc 127.0.0.1 $p | pw-cat -p --rate=$rate --channels=$ch --format=s16le --target=MyMicDoird
         """.trimIndent()
     }
 
@@ -140,11 +140,11 @@ nc 127.0.0.1 $p | pw-cat -p --rate=$rate --channels=$ch --format=s16le --target=
         val rate = config.value.sampleRate
         val ch = config.value.channels
         return """
-# Fallback legado para PulseAudio (Ubuntu 20.04 ou anterior)
+# Fallback para PulseAudio (Ubuntu 20.04 ou anterior)
 adb forward tcp:$p tcp:$p
-[ -p /tmp/droidmic ] || mkfifo /tmp/droidmic
-pactl load-module module-pipe-source source_name=droidmic file=/tmp/droidmic format=s16le rate=$rate channels=$ch
-nc 127.0.0.1 $p > /tmp/droidmic
+[ -p /tmp/mymicdoird ] || mkfifo /tmp/mymicdoird
+pactl load-module module-pipe-source source_name=MyMicDoird file=/tmp/mymicdoird format=s16le rate=$rate channels=$ch
+nc 127.0.0.1 $p > /tmp/mymicdoird
         """.trimIndent()
     }
 
@@ -163,7 +163,7 @@ nc 127.0.0.1 $p > /tmp/droidmic
         return """
 #!/usr/bin/env bash
 # ==============================================================================
-# DroidMic - Script de Inicializacao e Auto-Reconexao para Ubuntu 24.04 / Debian
+# MyMicDoird - Script de Inicializacao e Auto-Reconexao para Ubuntu / Debian
 # Suporta: PipeWire Nativo (pw-cat), PulseAudio (pacat) e Fallback FIFO
 # ==============================================================================
 set -euo pipefail
@@ -172,26 +172,25 @@ PORT=$p
 RATE=$rate
 CHANNELS=$ch
 CHANNEL_MAP="$chMap"
-DEVICE_NAME="DroidMic"
+DEVICE_NAME="MyMicDoird"
 MODULE_ID=""
 
 cleanup() {
     echo ""
-    echo "[DroidMic] Encerrando transmissao e liberando recursos..."
+    echo "[MyMicDoird] Encerrando transmissao e liberando recursos..."
+    # Descarrega UNICAMENTE o modulo criado por este script, sem afetar outros apps
     if [ -n "${'$'}MODULE_ID" ]; then
         pactl unload-module "${'$'}MODULE_ID" 2>/dev/null || true
     fi
-    pactl unload-module module-null-sink 2>/dev/null || true
-    pactl unload-module module-pipe-source 2>/dev/null || true
-    rm -f /tmp/droidmic 2>/dev/null || true
-    echo "[DroidMic] Desconectado com sucesso."
+    rm -f /tmp/mymicdoird 2>/dev/null || true
+    echo "[MyMicDoird] Desconectado com sucesso."
     exit 0
 }
 
 trap cleanup INT TERM EXIT
 
 echo "=========================================================="
-echo "          DroidMic: Microfone Virtual Ubuntu              "
+echo "          MyMicDoird: Microfone Virtual Ubuntu            "
 echo "=========================================================="
 
 # 1. Verificar presenca do ADB
@@ -207,7 +206,7 @@ if ! command -v nc >/dev/null 2>&1; then
 fi
 
 # 3. Verificar dispositivo conectado via ADB
-echo "[DroidMic] Verificando conexao USB via ADB..."
+echo "[MyMicDoird] Verificando conexao USB via ADB..."
 DEVICE_COUNT=${'$'}(adb devices | grep -v "List of devices" | grep -c "device" || true)
 if [ "${'$'}DEVICE_COUNT" -eq 0 ]; then
     echo "[AVISO] Nenhum celular detectado pelo ADB!"
@@ -216,44 +215,49 @@ if [ "${'$'}DEVICE_COUNT" -eq 0 ]; then
 fi
 
 # 4. Configurar encaminhamento de porta
-echo "[DroidMic] Configurando porta ADB tcp:${'$'}PORT..."
+echo "[MyMicDoird] Configurando porta ADB tcp:${'$'}PORT..."
 adb forward tcp:${'$'}PORT tcp:${'$'}PORT
 
 # 5. Criar fonte virtual no PipeWire ou PulseAudio
-echo "[DroidMic] Criando Microfone Virtual '${'$'}DEVICE_NAME'..."
-pactl unload-module module-null-sink 2>/dev/null || true
+echo "[MyMicDoird] Configurando nó de áudio '${'$'}DEVICE_NAME'..."
 
-# Tenta carregar null-sink com classe de microfone virtual (Padrao PipeWire no Ubuntu 24.04)
+# Remove modulo anterior especifico do MyMicDoird se existir
+OLD_ID=${'$'}(pactl list short modules 2>/dev/null | grep "${'$'}DEVICE_NAME" | awk '{print ${'$'}1}' | head -n 1 || true)
+if [ -n "${'$'}OLD_ID" ]; then
+    pactl unload-module "${'$'}OLD_ID" 2>/dev/null || true
+fi
+
+# Tenta carregar null-sink com classe de microfone virtual (Padrao PipeWire no Ubuntu 24.04/22.04)
 MODULE_ID=${'$'}(pactl load-module module-null-sink media.class=Audio/Source/Virtual sink_name="${'$'}DEVICE_NAME" channel_map="${'$'}CHANNEL_MAP" 2>/dev/null || true)
 
 if [ -z "${'$'}MODULE_ID" ]; then
     # Fallback para PulseAudio classico
-    echo "[DroidMic] PipeWire virtual source falhou, usando fallback PulseAudio module-pipe-source..."
-    [ -p /tmp/droidmic ] || mkfifo /tmp/droidmic
-    MODULE_ID=${'$'}(pactl load-module module-pipe-source source_name="${'$'}DEVICE_NAME" file=/tmp/droidmic format=s16le rate=${'$'}RATE channels=${'$'}CHANNELS 2>/dev/null || true)
+    echo "[MyMicDoird] PipeWire virtual source falhou, usando fallback PulseAudio module-pipe-source..."
+    [ -p /tmp/mymicdoird ] || mkfifo /tmp/mymicdoird
+    MODULE_ID=${'$'}(pactl load-module module-pipe-source source_name="${'$'}DEVICE_NAME" file=/tmp/mymicdoird format=s16le rate=${'$'}RATE channels=${'$'}CHANNELS 2>/dev/null || true)
 fi
 
-echo "[DroidMic] -> Microfone '${'$'}DEVICE_NAME' ativado com sucesso!"
-echo "[DroidMic] Selecione 'DroidMic' no Discord, OBS, Zoom, Google Meet, etc."
-echo "[DroidMic] Iniciando loop de transmissao com auto-reconexo (Pressione Ctrl+C para sair)..."
+echo "[MyMicDoird] -> Microfone '${'$'}DEVICE_NAME' ativado com sucesso (ID: ${'$'}MODULE_ID)!"
+echo "[MyMicDoird] Selecione 'MyMicDoird' no Discord, OBS, Zoom, Google Meet, etc."
+echo "[MyMicDoird] Iniciando loop de transmissao com auto-reconexo (Pressione Ctrl+C para sair)..."
 
 # 6. Loop resiliente de streaming e auto-reconexo
 while true; do
-    echo "[DroidMic] Conectando ao fluxo de audio em 127.0.0.1:${'$'}PORT..."
+    echo "[MyMicDoird] Conectando ao fluxo de audio em 127.0.0.1:${'$'}PORT..."
 
     if command -v pw-cat >/dev/null 2>&1; then
-        # Melhor metodo nativo PipeWire
+        # Metodo nativo PipeWire
         nc 127.0.0.1 "${'$'}PORT" | pw-cat -p --rate="${'$'}RATE" --channels="${'$'}CHANNELS" --format=s16le --target="${'$'}DEVICE_NAME" || true
     elif command -v pacat >/dev/null 2>&1; then
         # Metodo PulseAudio compat
         nc 127.0.0.1 "${'$'}PORT" | pacat --playback -p --rate="${'$'}RATE" --channels="${'$'}CHANNELS" --format=s16le -d "${'$'}DEVICE_NAME" || true
     else
         # Fallback FIFO
-        [ -p /tmp/droidmic ] || mkfifo /tmp/droidmic
-        nc 127.0.0.1 "${'$'}PORT" > /tmp/droidmic || true
+        [ -p /tmp/mymicdoird ] || mkfifo /tmp/mymicdoird
+        nc 127.0.0.1 "${'$'}PORT" > /tmp/mymicdoird || true
     fi
 
-    echo "[DroidMic] Conexao interrompida. Tentando reconectar em 2 segundos..."
+    echo "[MyMicDoird] Conexao interrompida. Tentando reconectar em 2 segundos..."
     adb forward tcp:${'$'}PORT tcp:${'$'}PORT 2>/dev/null || true
     sleep 2
 done

@@ -22,6 +22,10 @@ sealed class UpdateState {
         val downloadedBytes: Long,
         val totalBytes: Long
     ) : UpdateState()
-    data class ReadyToInstall(val apkFile: File, val release: GitHubRelease) : UpdateState()
+    data class ReadyToInstall(
+        val apkFile: File,
+        val release: GitHubRelease,
+        val sha256: String = ""
+    ) : UpdateState()
     data class Error(val message: String) : UpdateState()
 }

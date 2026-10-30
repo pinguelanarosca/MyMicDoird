@@ -566,13 +566,24 @@ private fun ReadyToInstallCard(
                 color = Color(0xFFA7F3D0)
             )
 
+            if (state.sha256.isNotBlank()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "SHA-256: ${state.sha256}",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    color = Color(0xFF6EE7B7),
+                    lineHeight = 14.sp
+                )
+            }
+
             Spacer(modifier = Modifier.height(14.dp))
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Security, contentDescription = null, tint = Color(0xFF6EE7B7), modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "Se solicitado pelo sistema, conceda permissão de 'Instalar apps desconhecidos'.",
+                    text = "Pacote verificado. Se solicitado pelo sistema, conceda permissão de 'Instalar apps desconhecidos'.",
                     fontSize = 11.sp,
                     color = Color(0xFF6EE7B7)
                 )

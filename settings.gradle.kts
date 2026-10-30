@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "DroidMic"
+rootProject.name = "MyMicDoird"
 
 include(":app")

@@ -1,6 +1,6 @@
 <resources>
-    <string name="app_name">DroidMic</string>
-    <string name="channel_streaming_name">Serviço de Microfone DroidMic</string>
+    <string name="app_name">MyMicDoird</string>
+    <string name="channel_streaming_name">Serviço de Microfone MyMicDoird</string>
     <string name="channel_streaming_desc">Notificação contínua enquanto o microfone estiver transmitindo áudio para o PC.</string>
     <string name="status_ready">Pronto para conectar</string>
     <string name="status_listening">Aguardando conexão do Ubuntu no porto %1$d…</string>

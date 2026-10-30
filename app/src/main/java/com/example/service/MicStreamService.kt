@@ -1,5 +1,6 @@
 package com.example.service
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
@@ -8,16 +9,17 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.R
 import com.example.audio.AudioStreamManager
 import com.example.data.PreferencesManager
-import com.example.model.StreamConfig
 import com.example.model.StreamMetrics
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,8 +41,9 @@ class MicStreamService : Service() {
         audioStreamManager = AudioStreamManager(applicationContext)
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DroidMic::StreamingWakeLock")
-        wakeLock?.acquire(12 * 60 * 60 * 1000L) // 12 hours max safety
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MyMicDoird::StreamingWakeLock").apply {
+            setReferenceCounted(false)
+        }
 
         createNotificationChannel()
 
@@ -56,8 +59,25 @@ class MicStreamService : Service() {
 
         when (action) {
             ACTION_START -> {
+                // Verify RECORD_AUDIO permission prior to launching microphone foreground service
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                    != PackageManager.PERMISSION_GRANTED
+                ) {
+                    val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    val errorNotification = buildNotification("Permissão de microfone negada. Conceda acesso nas configurações.")
+                    nm.notify(NOTIFICATION_ID, errorNotification)
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+
                 val prefs = PreferencesManager(applicationContext)
                 val config = prefs.loadConfig()
+
+                // Acquire WakeLock safely while active
+                try {
+                    wakeLock?.acquire(4 * 60 * 60 * 1000L) // 4 hours safety max
+                } catch (_: Exception) {}
+
                 startForegroundWithNotification()
                 audioStreamManager?.start(config, serviceScope)
             }
@@ -74,7 +94,7 @@ class MicStreamService : Service() {
     }
 
     private fun startForegroundWithNotification() {
-        val notification = buildNotification("Iniciando microfone...")
+        val notification = buildNotification("Iniciando captura de áudio...")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -133,7 +153,7 @@ class MicStreamService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("DroidMic: Microfone Ativo")
+            .setContentTitle("MyMicDoird: Microfone Ativo")
             .setContentText(statusText)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentIntent(openAppPendingIntent)
@@ -165,9 +185,11 @@ class MicStreamService : Service() {
 
     private fun stopStreamingAndService() {
         audioStreamManager?.stop()
-        if (wakeLock?.isHeld == true) {
-            wakeLock?.release()
-        }
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+        } catch (_: Exception) {}
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -189,7 +211,7 @@ class MicStreamService : Service() {
     }
 
     companion object {
-        const val CHANNEL_ID = "droidmic_stream_channel"
+        const val CHANNEL_ID = "mymicdoird_stream_channel"
         const val NOTIFICATION_ID = 1001
 
         const val ACTION_START = "com.example.ACTION_START"

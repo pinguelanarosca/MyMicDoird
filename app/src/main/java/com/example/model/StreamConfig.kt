@@ -6,7 +6,7 @@ import android.media.MediaRecorder
 enum class StreamMode(val displayName: String, val description: String) {
     TCP_SERVER(
         "TCP Servidor (Recomendado via adb forward)",
-        "O celular aguarda conexão no porto. No Ubuntu: adb forward tcp:8088 tcp:8088"
+        "O celular aguarda conexão no porto local. No Ubuntu: adb forward tcp:8088 tcp:8088"
     ),
     TCP_CLIENT(
         "TCP Cliente (via adb reverse)",
@@ -30,6 +30,7 @@ data class StreamConfig(
     val channels: Int = 1, // 1 = Mono, 2 = Stereo
     val streamMode: StreamMode = StreamMode.TCP_SERVER,
     val targetHost: String = "127.0.0.1",
+    val bindToLoopbackOnly: Boolean = true, // Security: bind strictly to 127.0.0.1 (ADB only)
     val audioSource: Int = MediaRecorder.AudioSource.MIC,
     val bufferPreset: BufferPreset = BufferPreset.BALANCED,
     val enableNoiseSuppressor: Boolean = true,
@@ -46,6 +47,17 @@ data class StreamConfig(
 
     val bytesPerSample: Int
         get() = 2 * channels // 16-bit = 2 bytes per sample per channel
+
+    companion object {
+        const val MIN_PORT = 1024
+        const val MAX_PORT = 65535
+
+        fun isValidPort(port: Int): Boolean = port in MIN_PORT..MAX_PORT
+
+        fun sanitizePort(port: Int, fallback: Int = 8088): Int {
+            return if (isValidPort(port)) port else fallback
+        }
+    }
 }
 
 data class StreamMetrics(
