@@ -122,16 +122,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val p = config.value.port
         val rate = config.value.sampleRate
         val ch = config.value.channels
-        val chMap = if (ch == 2) "stereo" else "mono"
         return """
-# 1. Encaminhar porta ADB do celular (especifique -s SERIAL se houver outros dispositivos como Redroid)
+# Configuração do Microfone Virtual (PipeWire 1.6.2+ / PulseAudio no Ubuntu)
 adb forward tcp:$p tcp:$p
-
-# 2. Criar Microfone Virtual nativo no PipeWire (Ubuntu 24.04 LTS / 22.04 LTS / PipeWire 1.6.2)
-pactl load-module module-null-sink media.class=Audio/Source/Virtual sink_name=MyMicDoird channel_map=$chMap
-
-# 3. Transmitir audio direto para o dispositivo virtual (stdin no PipeWire)
-nc 127.0.0.1 $p | pw-cat -p --rate=$rate --channels=$ch --format=s16 -
+rm -f /tmp/mymicdoird.fifo && mkfifo /tmp/mymicdoird.fifo
+pactl load-module module-pipe-source source_name=MyMicDoird file=/tmp/mymicdoird.fifo format=s16le rate=$rate channels=$ch source_properties="device.description='MyMicDoird_Microphone'"
+nc 127.0.0.1 $p > /tmp/mymicdoird.fifo
         """.trimIndent()
     }
 
@@ -140,11 +136,11 @@ nc 127.0.0.1 $p | pw-cat -p --rate=$rate --channels=$ch --format=s16 -
         val rate = config.value.sampleRate
         val ch = config.value.channels
         return """
-# Fallback para PulseAudio clássico (Ubuntu 20.04 ou anterior)
+# Fallback / Compatibilidade Universal PulseAudio / PipeWire
 adb forward tcp:$p tcp:$p
-[ -p /tmp/mymicdoird ] || mkfifo /tmp/mymicdoird
-pactl load-module module-pipe-source source_name=MyMicDoird file=/tmp/mymicdoird format=s16le rate=$rate channels=$ch
-nc 127.0.0.1 $p > /tmp/mymicdoird
+rm -f /tmp/mymicdoird.fifo && mkfifo /tmp/mymicdoird.fifo
+pactl load-module module-pipe-source source_name=MyMicDoird file=/tmp/mymicdoird.fifo format=s16le rate=$rate channels=$ch source_properties="device.description='MyMicDoird_Microphone'"
+nc 127.0.0.1 $p > /tmp/mymicdoird.fifo
         """.trimIndent()
     }
 
@@ -159,7 +155,6 @@ nc 127.0.0.1 $p > /tmp/mymicdoird
         val p = config.value.port
         val rate = config.value.sampleRate
         val ch = config.value.channels
-        val chMap = if (ch == 2) "stereo" else "mono"
         return """
 #!/usr/bin/env bash
 # ==============================================================================
@@ -171,17 +166,18 @@ set -euo pipefail
 PORT=$p
 RATE=$rate
 CHANNELS=$ch
-CHANNEL_MAP="$chMap"
 DEVICE_NAME="MyMicDoird"
+FIFO="/tmp/mymicdoird.fifo"
 MODULE_ID=""
 
 cleanup() {
     echo ""
     echo "[MyMicDoird] Encerrando transmissão e liberando recursos..."
+    exec 3>&- 2>/dev/null || true
     if [ -n "${'$'}MODULE_ID" ]; then
         pactl unload-module "${'$'}MODULE_ID" 2>/dev/null || true
     fi
-    rm -f /tmp/mymicdoird 2>/dev/null || true
+    rm -f "${'$'}FIFO" 2>/dev/null || true
     echo "[MyMicDoird] Concluído."
     exit 0
 }
@@ -201,10 +197,8 @@ if [ -z "${'$'}SERIAL" ]; then
         SERIAL=${'$'}(echo "${'$'}PHYSICAL_DEVICES" | tr -d '[:space:]')
         echo "[MyMicDoird] Dispositivo USB selecionado: ${'$'}SERIAL"
     else
-        # Se houver ambiguidade ou múltiplos dispositivos (ex: Redroid em 127.0.0.1 ou Fire Stick)
-        echo "[MyMicDoird] Selecione o dispositivo definindo: export ANDROID_SERIAL=<SERIAL>"
-        adb devices
-        SERIAL=${'$'}(adb devices | grep -v "List of devices" | grep "device${'$'}" | awk '{print ${'$'}1}' | head -n 1 || true)
+        echo "[MyMicDoird] Dispositivo padrão ou especificado via ANDROID_SERIAL"
+        SERIAL=${'$'}(adb devices | grep -v "List of devices" | grep -w "device" | awk '{print ${'$'}1}' | head -n 1 || true)
     fi
 fi
 
@@ -212,30 +206,30 @@ fi
 echo "[MyMicDoird] Configurando redirecionamento de porta..."
 adb -s "${'$'}SERIAL" forward tcp:${'$'}PORT tcp:${'$'}PORT
 
-# 3. Criar nó de áudio virtual no PipeWire ou PulseAudio
-OLD_ID=${'$'}(pactl list short modules 2>/dev/null | grep "${'$'}DEVICE_NAME" | awk '{print ${'$'}1}' | head -n 1 || true)
-if [ -n "${'$'}OLD_ID" ]; then
-    pactl unload-module "${'$'}OLD_ID" 2>/dev/null || true
+# 3. Criar microfone virtual isolado no PipeWire / PulseAudio via module-pipe-source
+OLD_IDS=${'$'}(pactl list short modules 2>/dev/null | grep -E "source_name=MyMicDoird|file=/tmp/mymicdoird\.fifo" | awk '{print ${'$'}1}' || true)
+if [ -n "${'$'}OLD_IDS" ]; then
+    for mid in ${'$'}OLD_IDS; do
+        pactl unload-module "${'$'}mid" 2>/dev/null || true
+    done
 fi
 
-MODULE_ID=${'$'}(pactl load-module module-null-sink media.class=Audio/Source/Virtual sink_name="${'$'}DEVICE_NAME" channel_map="${'$'}CHANNEL_MAP" 2>/dev/null || true)
-if [ -z "${'$'}MODULE_ID" ]; then
-    [ -p /tmp/mymicdoird ] || mkfifo /tmp/mymicdoird
-    MODULE_ID=${'$'}(pactl load-module module-pipe-source source_name="${'$'}DEVICE_NAME" file=/tmp/mymicdoird format=s16le rate=${'$'}RATE channels=${'$'}CHANNELS 2>/dev/null || true)
+rm -f "${'$'}FIFO"
+mkfifo "${'$'}FIFO"
+exec 3<> "${'$'}FIFO"
+
+MODULE_ID=${'$'}(pactl load-module module-pipe-source source_name="${'$'}DEVICE_NAME" file="${'$'}FIFO" format=s16le rate=${'$'}RATE channels=${'$'}CHANNELS source_properties="device.description='MyMicDoird_Microphone'" 2>/dev/null || true)
+
+if [ -z "${'$'}MODULE_ID" ] || ! echo "${'$'}MODULE_ID" | grep -qE '^[0-9]+${'$'}'; then
+    echo "[ERRO] Falha ao carregar module-pipe-source no PulseAudio/PipeWire!" >&2
+    exit 1
 fi
 
 echo "[MyMicDoird] Microfone '${'$'}DEVICE_NAME' ativado (ID: ${'$'}MODULE_ID)."
 
 while true; do
     echo "[MyMicDoird] Conectando ao áudio em 127.0.0.1:${'$'}PORT..."
-    if command -v pw-cat >/dev/null 2>&1; then
-        nc 127.0.0.1 "${'$'}PORT" | pw-cat -p --rate="${'$'}RATE" --channels="${'$'}CHANNELS" --format=s16 - || true
-    elif command -v pacat >/dev/null 2>&1; then
-        nc 127.0.0.1 "${'$'}PORT" | pacat --playback -p --rate="${'$'}RATE" --channels="${'$'}CHANNELS" --format=s16le -d "${'$'}DEVICE_NAME" || true
-    else
-        [ -p /tmp/mymicdoird ] || mkfifo /tmp/mymicdoird
-        nc 127.0.0.1 "${'$'}PORT" > /tmp/mymicdoird || true
-    fi
+    nc 127.0.0.1 "${'$'}PORT" >&3 || true
     echo "[MyMicDoird] Conexão interrompida. Reconectando em 2 segundos..."
     adb -s "${'$'}SERIAL" forward tcp:${'$'}PORT tcp:${'$'}PORT 2>/dev/null || true
     sleep 2

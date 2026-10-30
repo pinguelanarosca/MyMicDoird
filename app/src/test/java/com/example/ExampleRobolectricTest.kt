@@ -100,8 +100,8 @@ class ExampleRobolectricTest {
 
     // Must target MyMicDoird device name
     assertTrue(
-        "Script must declare MyMicDoird sink",
-        script.contains("sink_name=\"\$DEVICE_NAME\"")
+        "Script must declare MyMicDoird source",
+        script.contains("source_name=\"\$DEVICE_NAME\"")
     )
     assertTrue(
         "Script must have DEVICE_NAME MyMicDoird",
