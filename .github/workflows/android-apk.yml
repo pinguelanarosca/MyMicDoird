@@ -1,0 +1,108 @@
+name: Build MyMicDoird APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test and build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # This repository has gradle-wrapper.properties but no gradlew executable.
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      # compileSdk uses Android 16 QPR2 (API 36.1), not plain API 36.
+      - name: Install Android 36.1 and build tools
+        shell: bash
+        run: |
+          sdkmanager --install 'platforms;android-36.1' 'build-tools;36.0.0' 'platform-tools'
+          sdkmanager --list_installed
+
+      # app/build.gradle.kts expects a root debug.keystore.
+      # Set repository secret MYMICDOIRD_DEBUG_KEYSTORE_BASE64 for a stable signing key.
+      - name: Set up debug APK signing
+        shell: bash
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.MYMICDOIRD_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
+            printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 --decode > debug.keystore
+            echo 'SIGNING_SOURCE=repository-secret' >> "$GITHUB_ENV"
+          else
+            keytool -genkeypair -keystore debug.keystore \
+              -storepass android -keypass android -alias androiddebugkey \
+              -dname 'CN=Android Debug,O=Android,C=US' \
+              -keyalg RSA -keysize 2048 -validity 10000 -noprompt
+            echo 'SIGNING_SOURCE=temporary-debug-key' >> "$GITHUB_ENV"
+            echo '::warning::Temporary debug signing key: APK may not upgrade prior installations. Set MYMICDOIRD_DEBUG_KEYSTORE_BASE64 for stable signing.'
+          fi
+
+      - name: Check Ubuntu script syntax
+        shell: bash
+        run: bash -n linux/mymicdoird.sh
+
+      - name: Run tests and build debug APK
+        shell: bash
+        run: gradle --no-daemon --stacktrace :app:testDebugUnitTest :app:assembleDebug
+
+      - name: Verify APK and prepare downloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK='app/build/outputs/apk/debug/app-debug.apk'
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$APK" | grep -E '^(package:|minSdkVersion:|targetSdkVersion:)'
+          VERSION=$(sed -nE 's/^[[:space:]]*versionName = "([^"]+)".*/\1/p' app/build.gradle.kts | head -n 1)
+          test -n "$VERSION"
+          mkdir -p dist
+          TARGET="MyMicDoird-v${VERSION}-debug.apk"
+          cp "$APK" "dist/$TARGET"
+          (cd dist && sha256sum "$TARGET" > "$TARGET.sha256")
+          echo "Signing source: $SIGNING_SOURCE"
+          cat "dist/$TARGET.sha256"
+
+      - name: Upload APK and SHA-256
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyMicDoird-debug-${{ github.run_number }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyMicDoird-test-reports-${{ github.run_number }}
+          path: |
+            app/build/test-results/testDebugUnitTest/
+            app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+          retention-days: 7
